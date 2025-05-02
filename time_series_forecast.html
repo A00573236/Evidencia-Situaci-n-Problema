@@ -1,0 +1,209 @@
+
+<pre><code>
+# Import required libraries
+import pandas as pd
+import numpy as np
+from google.colab import files
+import statsmodels.api as sm
+from statsmodels.tsa.stattools import adfuller, kpss
+from statsmodels.tsa.arima.model import ARIMA
+from statsmodels.tsa.vector_ar.vecm import coint_johansen
+import matplotlib.pyplot as plt
+from itertools import combinations
+
+# Upload Excel files
+print("Please upload AAPL Excel file")
+aapl_upload = files.upload()
+aapl_filename = list(aapl_upload.keys())[0]
+aapl_df = pd.read_excel(aapl_filename)
+
+print("Please upload JNJ Excel file")
+jnj_upload = files.upload()
+jnj_filename = list(jnj_upload.keys())[0]
+jnj_df = pd.read_excel(jnj_filename)
+
+print("Please upload PEP Excel file")
+pep_upload = files.upload()
+pep_filename = list(pep_upload.keys())[0]
+pep_df = pd.read_excel(pep_filename)
+
+print("\nAAPL DataFrame columns:", list(aapl_df.columns))
+print("JNJ DataFrame columns:", list(jnj_df.columns))
+print("PEP DataFrame columns:", list(pep_df.columns))
+
+close_column = input("Please enter the column name containing closing prices: ")
+
+try:
+    aapl_close = aapl_df[close_column]
+    jnj_close = jnj_df[close_column]
+    pep_close = pep_df[close_column]
+except KeyError:
+    print(f"Error: Column '{{close_column}}' not found in one or more DataFrames")
+    print("Please check the column names and try again")
+    raise
+
+min_length = min(len(aapl_close), len(jnj_close), len(pep_close))
+aapl_close = aapl_close[:min_length]
+jnj_close = jnj_close[:min_length]
+pep_close = pep_close[:min_length]
+
+series_dict = {
+    'AAPL': aapl_close,
+    'JNJ': jnj_close,
+    'PEP': pep_close
+}
+
+diff_dict = {
+    name: series.diff().dropna() for name, series in series_dict.items()
+}
+
+def unit_root_tests(series, name):
+    print(f"\nUnit Root Tests for {{name}}:")
+
+    adf_result = adfuller(series)
+    print("ADF Test:")
+    print(f'ADF Statistic: {{adf_result[0]:.4f}}')
+    print(f'p-value: {{adf_result[1]:.4f}}')
+    print(f'Critical Values: {{adf_result[4]}}')
+    if adf_result[1] < 0.05:
+        print(f"  - p-value < 0.05: Reject null hypothesis - {{name}} is stationary")
+    else:
+        print(f"  - p-value >= 0.05: Fail to reject null - {{name}} may be non-stationary")
+
+    kpss_result = kpss(series)
+    print("\nKPSS Test:")
+    print(f'KPSS Statistic: {{kpss_result[0]:.4f}}')
+    print(f'p-value: {{kpss_result[1]:.4f}}')
+    print(f'Critical Values: {{kpss_result[3]}}')
+    if kpss_result[1] < 0.05:
+        print(f"  - p-value < 0.05: Reject null hypothesis - {{name}} is non-stationary")
+    else:
+        print(f"  - p-value >= 0.05: Fail to reject null - {{name}} may be stationary")
+
+for name, series in series_dict.items():
+    unit_root_tests(series, name)
+
+plt.figure(figsize=(12,6))
+for name, series in series_dict.items():
+    plt.plot(series, label=f'{{name}} Closing Price')
+plt.title('Closing Prices for AAPL, JNJ, and PEP')
+plt.xlabel('Time')
+plt.ylabel('Price')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+plt.figure(figsize=(12,6))
+for name, diff_series in diff_dict.items():
+    plt.plot(diff_series, label=f'{{name}} Differenced')
+plt.title('Differenced Series for AAPL, JNJ, and PEP')
+plt.legend()
+plt.show()
+
+def cointegration_test(df, pair_name):
+    result = coint_johansen(df, det_order=0, k_ar_diff=1)
+    print(f"\nJohansen Cointegration Test for {{pair_name}}:")
+    print(f"Trace statistic: {{result.lr1}}")
+    print(f"Critical values (90%, 95%, 99%): {{result.cvt}}")
+    for i in range(len(result.lr1)):
+        if result.lr1[i] > result.cvt[i, 1]:
+            print(f"  - r = {{i}}: Cointegration exists at 95% confidence level")
+        else:
+            print(f"  - r = {{i}}: No cointegration at 95% confidence level")
+    if result.lr1[0] > result.cvt[0, 1]:
+        print(f"Conclusion: {{pair_name}} are cointegrated")
+    else:
+        print(f"Conclusion: No cointegration between {{pair_name}}")
+
+from itertools import combinations
+pairs = list(combinations(series_dict.keys(), 2))
+for pair in pairs:
+    pair_df = pd.DataFrame({
+        pair[0]: series_dict[pair[0]],
+        pair[1]: series_dict[pair[1]]
+    }).dropna()
+    cointegration_test(pair_df, f"{{pair[0]}} and {{pair[1]}}")
+
+def find_best_arima(series, name, max_p=3, max_d=2, max_q=3):
+    best_aic = float('inf')
+    best_order = None
+    for p in range(max_p + 1):
+        for d in range(max_d + 1):
+            for q in range(max_q + 1):
+                try:
+                    model = ARIMA(series, order=(p, d, q))
+                    results = model.fit()
+                    if results.aic < best_aic:
+                        best_aic = results.aic
+                        best_order = (p, d, q)
+                except:
+                    continue
+    print(f"\nBest ARIMA model for {{name}}:")
+    print(f"Order: {{best_order}}")
+    print(f"AIC: {{best_aic:.2f}}")
+    return best_order
+
+arima_orders = {}
+for name, series in series_dict.items():
+    arima_orders[name] = find_best_arima(series, name)
+
+models = {}
+forecasts = {}
+forecast_steps = 30
+for name, series in series_dict.items():
+    model = ARIMA(series, order=arima_orders[name]).fit()
+    models[name] = model
+    forecasts[name] = model.forecast(steps=forecast_steps)
+
+last_index = len(aapl_close) - 1
+forecast_index = range(last_index + 1, last_index + 1 + forecast_steps)
+
+plt.figure(figsize=(12,6))
+for name in series_dict.keys():
+    plt.plot(series_dict[name], label=f'{{name}} Historical')
+    plt.plot(forecast_index, forecasts[name], label=f'{{name}} Forecast', linestyle='--')
+plt.title('AAPL, JNJ, and PEP Closing Prices with Forecasts')
+plt.legend()
+plt.show()
+
+def plot_forecast(model, series, name, steps=30):
+    forecast_obj = model.get_forecast(steps=steps)
+    forecast = forecast_obj.predicted_mean
+    conf_int = forecast_obj.conf_int()
+
+    forecast_index = range(len(series), len(series) + steps)
+
+    plt.figure(figsize=(12,6))
+    plt.plot(series, label=f'{{name}} Historical')
+    plt.plot(forecast_index, forecast, label='Forecast', color='red')
+    plt.fill_between(forecast_index,
+                    conf_int.iloc[:, 0],
+                    conf_int.iloc[:, 1],
+                    color='pink',
+                    alpha=0.3,
+                    label='95% Confidence Interval')
+    plt.title(f'{{name}} Price Forecast')
+    plt.legend()
+    plt.show()
+
+    last_value = series.iloc[-1]
+    mean_forecast = forecast.mean()
+    print(f"\nForecast Interpretation for {{name}}:")
+    print(f"Last observed value: {{last_value:.2f}}")
+    print(f"Average forecast value: {{mean_forecast:.2f}}")
+    print(f"Forecast change: {{mean_forecast - last_value:.2f}}")
+    if mean_forecast > last_value:
+        print("Trend: Upward")
+    elif mean_forecast < last_value:
+        print("Trend: Downward")
+    else:
+        print("Trend: Flat")
+    print(f"95% CI range at period {{steps}}: [{{conf_int.iloc[-1, 0]:.2f}}, {{conf_int.iloc[-1, 1]:.2f}}]")
+
+for name in series_dict.keys():
+    plot_forecast(models[name], series_dict[name], name)
+
+for name in series_dict.keys():
+    print(f"\n{{name}} Forecast Values (next 5 periods):")
+    print(forecasts[name][:5])
+</code></pre>
